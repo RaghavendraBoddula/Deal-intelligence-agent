@@ -210,8 +210,8 @@ st.markdown(
         </div>
       </div>
       <div class="status">
-        <span class="pill {groq_state}">{groq_label}</span>
-        <span class="pill {memory_state}">{memory_label}</span>
+        <span class="pill {groq_state}"><span class="status-dot"></span>{groq_label}</span>
+        <span class="pill {memory_state}"><span class="status-dot"></span>{memory_label}</span>
         <span class="pill neutral">{esc(groq_model())}</span>
       </div>
     </div>
@@ -254,17 +254,18 @@ for column, deal in zip(card_cols, pipeline):
     hot_html = f" · <span class='hot-inline'>{hot} overdue</span>" if hot else ""
     value = money(deal["value_inr"])
     active = deal["slug"] == selected["slug"]
+    stage_cls = "stage-" + deal["stage"].lower().replace(" ", "-")
     with column:
         with st.container(key=("dcardon_" if active else "dcardoff_") + deal["slug"]):
             st.markdown(
-                f"<p class='deal-stage'>{esc(deal['stage'])}</p>"
-                f"<p class='deal-name'>{esc(deal['name'])}</p>"
-                f"<p class='deal-meta'>{esc(value)}{hot_html}</p>",
+                f"<span class='deal-stage {stage_cls}'>{esc(deal['stage'])}</span>"
+                f"<div class='deal-name'>{esc(deal['name'])}</div>"
+                f"<div class='deal-meta'><span class='val-bold'>{esc(value)}</span>{hot_html}</div>",
                 unsafe_allow_html=True,
             )
             if active:
-                st.markdown("<div class='in-view'>In view</div>", unsafe_allow_html=True)
-            elif st.button("Open", key=f"sel_{deal['slug']}"):
+                st.markdown("<div class='in-view'><span class='in-view-dot'></span>Active Deal</div>", unsafe_allow_html=True)
+            elif st.button("Open Deal", key=f"sel_{deal['slug']}"):
                 st.session_state["active_slug"] = deal["slug"]
                 st.rerun()
 
@@ -279,16 +280,16 @@ else:
 
 flag_html = ""
 if selected_overdue:
-    flag_html += f"<span class='flag hot'>{selected_overdue} overdue</span>"
-flag_html += f"<span class='flag'>{selected_notes} touchpoints</span>"
+    flag_html += f"<span class='flag hot'>⚠️ {selected_overdue} overdue</span>"
+flag_html += f"<span class='flag'>💬 {selected_notes} touchpoints</span>"
 if selected["value_inr"]:
-    flag_html += f"<span class='flag'>{esc(money(selected['value_inr']))}</span>"
+    flag_html += f"<span class='flag val'>💰 {esc(money(selected['value_inr']))}</span>"
 
 st.markdown(
     f"""
     <div class="context">
       <div>
-        <div class="kicker">{esc(selected['stage'])}</div>
+        <div class="kicker"><span class="in-view-dot"></span>{esc(selected['stage'])}</div>
         <h2>{esc(selected['name'])}</h2>
         <p>{esc(story)}</p>
       </div>
@@ -586,7 +587,8 @@ elif view == "Timeline":
         }
         items = []
         for item in reversed(rows):
-            tactic = f"<p><b>Tactic</b><br>{esc(item['tactic'])}</p>" if item["tactic"] else ""
+            tactic = f"<div class='tl-callout tactic'><b>Tactic Tried</b>{esc(item['tactic'])}</div>" if item["tactic"] else ""
+            outcome = f"<div class='tl-callout outcome'><b>Outcome / Next Steps</b>{esc(item['outcome'])}</div>" if item["outcome"] else ""
             result_label, result_class = result_badge.get(item["result"], ("", ""))
             result_html = f"<span class='badge {result_class}'>{result_label}</span>" if result_label else ""
             items.append(
@@ -599,7 +601,7 @@ elif view == "Timeline":
                     <span class="tl-contact">{esc(item['contact'])}</span>
                   </div>
                   <p><b>Notes</b><br>{esc(item['notes'])}</p>
-                  <p><b>Outcome</b><br>{esc(item['outcome'])}</p>
+                  {outcome}
                   {tactic}
                 </div>
                 """
