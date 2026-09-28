@@ -1,504 +1,615 @@
 import sys
 import os
 
-# ─────────────────────────────────────────────────────────────
-# AUTO-LAUNCHER: allows `python app.py` to work by
-# automatically re-launching through Streamlit's runtime.
-# ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
         from streamlit import runtime
+
         if not runtime.exists():
             from streamlit.web import cli as stcli
+
             sys.argv = ["streamlit", "run", os.path.abspath(__file__)]
             sys.exit(stcli.main())
     except ImportError:
         pass
 
-import re
 import html
-import requests
+import uuid
+from datetime import date
+from pathlib import Path
+
 import streamlit as st
 from dotenv import load_dotenv
 from groq import Groq
 
-# Requires streamlit >= 1.40  (container keys + st.pills)
+from dealrecall.agent import groq_model, parse_sections, run_brief
+from dealrecall.memory import Memory
+from dealrecall.store import Store, format_inr, is_overdue
+from dealrecall.theme import CSS
 
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
-HINDSIGHT_API_KEY = os.getenv("HINDSIGHT_API_KEY")
-HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "https://ui.hindsight.vectorize.io/api")
-
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+ROOT = Path(__file__).resolve().parent
+store = Store(ROOT / "data" / "dealrecall.db")
 
 st.set_page_config(
     page_title="DealRecall | Sales Copilot",
-    page_icon="🤝",
+    page_icon="DR",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
-# ─────────────────────────────────────────────────────────────
-# DESIGN SYSTEM
-# Ink navy + paper white, one signal colour (teal) and one
-# "attention" colour (amber) reserved for open commitments.
-# ─────────────────────────────────────────────────────────────
-CSS = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
-
-:root {
-  --ink: #12243A;
-  --ink-soft: #4A5B70;
-  --paper: #F5F7FA;
-  --card: #FFFFFF;
-  --line: #E1E7EF;
-  --teal: #0E8A8C;
-  --teal-soft: #E3F4F4;
-  --amber: #B7791F;
-  --amber-soft: #FCF3DF;
-  --radius: 16px;
-}
-
-html, body, .stApp, [class*="css"] { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-.stApp { background: var(--paper); color: var(--ink); }
-.stApp p, .stApp li, .stApp label, .stApp span, .stApp div[data-testid="stMarkdownContainer"] { color: var(--ink); }
-h1, h2, h3 { font-family: 'Fraunces', Georgia, serif !important; color: var(--ink) !important; letter-spacing: -0.01em; }
-
-/* Chrome */
-#MainMenu, footer, [data-testid="stToolbar"] { visibility: hidden; }
-header[data-testid="stHeader"] { background: transparent; }
-.block-container { padding-top: 1.6rem; padding-bottom: 4rem; max-width: 1180px; }
-
-/* Hero */
-.hero {
-  background: linear-gradient(135deg, #12243A 0%, #17466A 60%, #0E8A8C 130%);
-  border-radius: 24px; padding: 2.2rem 2.4rem; margin-bottom: 1.4rem;
-  display: flex; gap: 2rem; justify-content: space-between; align-items: flex-end; flex-wrap: wrap;
-}
-.hero h1 { color: #fff !important; font-size: 2.5rem; margin: 0 0 .35rem 0; line-height: 1.1; }
-.hero p { color: #C9D8E8 !important; margin: 0; max-width: 34rem; font-size: 1.02rem; line-height: 1.55; }
-.hero-stats { display: flex; gap: .8rem; flex-wrap: wrap; }
-.stat {
-  background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.18);
-  border-radius: 14px; padding: .8rem 1.1rem; min-width: 108px; backdrop-filter: blur(4px);
-}
-.stat b { display: block; font-family: 'Fraunces', serif; font-size: 1.7rem; color: #fff; line-height: 1.1; }
-.stat span { color: #B9CCE0 !important; font-size: .8rem; }
-
-/* Tabs */
-.stTabs [data-baseweb="tab-list"] { gap: .4rem; border-bottom: 1px solid var(--line); overflow-x: auto; }
-.stTabs [data-baseweb="tab"] {
-  height: 46px; padding: 0 1.1rem; border-radius: 12px 12px 0 0; font-weight: 600; color: var(--ink-soft);
-  background: transparent; white-space: nowrap;
-}
-.stTabs [aria-selected="true"] { color: var(--teal) !important; background: var(--teal-soft); }
-.stTabs [data-baseweb="tab-highlight"] { background-color: var(--teal) !important; height: 3px; }
-.stTabs [data-baseweb="tab-border"] { display: none; }
-
-/* Inputs */
-.stTextInput input, .stTextArea textarea, div[data-baseweb="select"] > div {
-  background: var(--card) !important; border: 1.5px solid var(--line) !important;
-  border-radius: 12px !important; color: var(--ink) !important;
-}
-.stTextInput input:focus, .stTextArea textarea:focus { border-color: var(--teal) !important; box-shadow: 0 0 0 3px var(--teal-soft) !important; }
-.stTextInput label, .stTextArea label, .stSelectbox label { font-weight: 600 !important; color: var(--ink) !important; }
-
-/* Buttons */
-.stButton > button, .stFormSubmitButton > button {
-  border-radius: 12px; font-weight: 600; padding: .65rem 1.4rem; border: 1.5px solid var(--line);
-  transition: transform .12s ease, box-shadow .12s ease;
-}
-.stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"], .stFormSubmitButton > button {
-  background: var(--teal); color: #fff !important; border-color: var(--teal);
-}
-.stButton > button:hover, .stFormSubmitButton > button:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(14,138,140,.25); }
-.stButton > button:focus-visible, .stFormSubmitButton > button:focus-visible { outline: 3px solid var(--teal-soft); }
-
-/* Panels */
-[class*="st-key-panel"] {
-  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.4rem 1.5rem;
-  box-shadow: 0 1px 2px rgba(18,36,58,.04);
-}
-[class*="st-key-sec_"] {
-  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.1rem 1.3rem; height: 100%;
-}
-[class*="st-key-sec_1"] { background: var(--teal-soft); border-color: #BFE4E4; }
-[class*="st-key-sec_5"] { background: var(--amber-soft); border-color: #F0DDAE; }
-.sec-title { font-family: 'Fraunces', serif; font-weight: 700; font-size: 1.15rem; margin: 0 0 .5rem 0; color: var(--ink); }
-[class*="st-key-sec_"] li, [class*="st-key-sec_"] p { line-height: 1.6; font-size: .96rem; }
-
-/* Form */
-[data-testid="stForm"] { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.4rem 1.5rem; }
-
-/* Memory chips */
-.mem { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--teal);
-  border-radius: 10px; padding: .7rem .9rem; margin-bottom: .55rem; font-size: .9rem; line-height: 1.5; color: var(--ink); }
-.mem small { color: var(--ink-soft); font-weight: 700; }
-
-/* Empty state */
-.empty { text-align: center; padding: 2.6rem 1rem; color: var(--ink-soft); background: var(--card);
-  border: 1.5px dashed var(--line); border-radius: var(--radius); }
-.empty b { display: block; color: var(--ink); font-family: 'Fraunces', serif; font-size: 1.2rem; margin-bottom: .3rem; }
-
-/* Timeline */
-.tl { position: relative; margin: .5rem 0 0 .6rem; padding-left: 1.6rem; border-left: 2px solid var(--line); }
-.tl-item { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 1rem 1.2rem; margin-bottom: 1rem; }
-.tl-item::before { content: ""; position: absolute; left: -2.28rem; top: 1.25rem; width: 14px; height: 14px;
-  border-radius: 50%; background: var(--teal); border: 3px solid var(--paper); box-shadow: 0 0 0 2px var(--teal); }
-.tl-head { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: .4rem; }
-.tl-contact { font-weight: 700; color: var(--ink); }
-.badge { font-size: .76rem; font-weight: 700; padding: .2rem .65rem; border-radius: 999px; }
-.b-call { background: #E3F4F4; color: #0A6E70; } .b-demo { background: #E8ECFB; color: #3446A8; }
-.b-email { background: #FCF3DF; color: #8A5A0E; } .b-meeting { background: #F3E8FA; color: #6B2E97; }
-.tl-item p { margin: .3rem 0; line-height: 1.55; font-size: .94rem; }
-.tl-item p b { color: var(--ink-soft); font-weight: 600; }
-
-/* Sidebar */
-section[data-testid="stSidebar"] { background: #fff; border-right: 1px solid var(--line); }
-.pill { display: inline-block; font-size: .8rem; font-weight: 600; padding: .25rem .7rem; border-radius: 999px; margin: 0 .3rem .4rem 0; }
-.on { background: var(--teal-soft); color: #0A6E70; } .off { background: #FBE9E7; color: #A03A2C; }
-
-/* Responsive */
-@media (max-width: 768px) {
-  .block-container { padding: 1rem .9rem 3rem; }
-  .hero { padding: 1.4rem 1.2rem; border-radius: 18px; }
-  .hero h1 { font-size: 1.85rem; }
-  .stat { min-width: 92px; padding: .65rem .85rem; }
-  .stTabs [data-baseweb="tab"] { padding: 0 .75rem; font-size: .9rem; }
-  .stButton > button { width: 100%; }
-}
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
-</style>
-"""
 st.markdown(CSS, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────
-# STATE & DEMO DATA
-# ─────────────────────────────────────────────────────────────
-if "interactions" not in st.session_state:
-    st.session_state["interactions"] = [
-        {
-            "deal_name": "Acme Retail",
-            "contact": "Priya Shah (VP Operations)",
-            "type": "Discovery Call",
-            "notes": "Current manual reporting process takes 6 hours per week. Interested in automation but concerned about onboarding time. Budget around ₹8 lakh annually.",
-            "outcome": "Scheduled product demo.",
-        },
-        {
-            "deal_name": "Acme Retail",
-            "contact": "Priya Shah & Raj Malhotra (IT Security Lead)",
-            "type": "Product Demo",
-            "notes": "Priya likes workflow automation. Raj asks about SSO, SOC 2, and data residency. Also evaluating CompetitorFlow, which is cheaper.",
-            "outcome": "Promised retail case study to Priya and security docs to Raj.",
-        },
-        {
-            "deal_name": "Acme Retail",
-            "contact": "Priya Shah & Raj Malhotra",
-            "type": "Follow-up Email",
-            "notes": "Promised Priya a retail case study and agreed to send security documentation to Raj before Friday. Pricing objection: they want a discount for annual payment.",
-            "outcome": "Awaiting response; preparing for next call.",
-        },
-    ]
-
-if "last_brief" not in st.session_state:
-    st.session_state["last_brief"] = None
-
 QUICK_PROMPTS = {
-    "Full prep": "How should I prepare for my next call?",
-    "Handle pricing": "They want a discount. How should I handle the pricing conversation?",
-    "Beat competitor": "How do I position against the competitor they're evaluating?",
-    "Close the loop": "What have I promised that I still owe them?",
+    "Prep the call": "How should I prepare for the commercial call with Anil Deshpande on 30 September?",
+    "Handle pricing": "They want a discount because a competitor is cheaper. What should I do, based on deals we already won or lost?",
+    "Close the loop": "What have we promised that is still open, and what happens if we walk in without it?",
+    "Who is missing": "Which stakeholders are not in the room yet, and what did we learn about that on other deals?",
 }
 
 
-def deal_names():
-    names = sorted({i["deal_name"] for i in st.session_state["interactions"]})
-    return names or ["Acme Retail"]
+def esc(value) -> str:
+    return html.escape(str(value or ""))
 
 
-def esc(s):
-    return html.escape(str(s or ""))
+def groq_client():
+    key = os.getenv("GROQ_API_KEY", "").strip()
+    return Groq(api_key=key) if key else None
 
 
-# ─────────────────────────────────────────────────────────────
-# HINDSIGHT + LLM
-# ─────────────────────────────────────────────────────────────
-def retain_interaction(deal_name, contact, itype, notes, outcome):
-    text_payload = f"Deal: {deal_name} | Contact: {contact} | Type: {itype} | Notes: {notes} | Outcome: {outcome}"
-    st.session_state["interactions"].append(
-        {"deal_name": deal_name, "contact": contact, "type": itype, "notes": notes, "outcome": outcome}
-    )
-    if HINDSIGHT_API_KEY:
-        try:
-            headers = {"Authorization": f"Bearer {HINDSIGHT_API_KEY}", "Content-Type": "application/json"}
-            res = requests.post(
-                f"{HINDSIGHT_BASE_URL}/retain",
-                json={"bank_id": "sales_memory", "text": text_payload},
-                headers=headers,
-                timeout=5,
-            )
-            res.raise_for_status()
-        except Exception as e:
-            st.warning(f"Saved locally, but Hindsight couldn't be reached: {e}")
+def connect_memory() -> Memory | None:
+    return Memory.from_env()
 
 
-def prepare_brief(deal_name, query):
-    retrieved_memories = []
-
-    if HINDSIGHT_API_KEY:
-        try:
-            headers = {"Authorization": f"Bearer {HINDSIGHT_API_KEY}", "Content-Type": "application/json"}
-            res = requests.post(
-                f"{HINDSIGHT_BASE_URL}/recall",
-                json={"bank_id": "sales_memory", "query": f"{deal_name} {query}"},
-                headers=headers,
-                timeout=5,
-            )
-            if res.status_code == 200:
-                data = res.json()
-                retrieved_memories = [m.get("text") for m in data.get("memories", []) if m.get("text")]
-        except Exception:
-            st.toast("Hindsight unavailable, using local deal history.", icon="⚠️")
-
-    if not retrieved_memories:
-        retrieved_memories = [
-            f"[{i['type']}] Contact: {i['contact']} | Notes: {i['notes']} | Outcome: {i['outcome']}"
-            for i in st.session_state["interactions"]
-            if i["deal_name"].lower() in deal_name.lower()
-        ]
-
-    context_str = "\n".join(f"- {m}" for m in retrieved_memories)
-
-    system_prompt = f"""
-    You are DealRecall, an expert AI sales copilot.
-    Analyze the following historical deal interactions and construct a sharp, highly tactical pre-call brief.
-
-    RECALLED DEAL MEMORIES:
-    {context_str}
-
-    Provide your briefing structured EXACTLY as these six numbered sections, each starting on its own line as "N. Title":
-    1. Deal Summary: Core objectives and current deal status.
-    2. Key Stakeholders & Concerns: Name, role, and main priorities/concerns.
-    3. Objection Handling Strategy: Specific objections raised (e.g., pricing, competitors, onboarding) and recommended tactics to win.
-    4. Competitor Context: Positioning against competitors mentioned.
-    5. Pending Commitments: Open action items or deliverables promised.
-    6. Suggested Questions: Exactly 3 strategic questions to ask on the call.
-    Use short bullet points under each heading.
-    """
-
-    if groq_client:
-        try:
-            response = groq_client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": query}],
-                temperature=0.2,
-            )
-            brief = response.choices[0].message.content
-        except Exception as e:
-            brief = f"⚠️ Groq API error: {e}"
-    else:
-        brief = "⚠️ **Groq API key missing.** Add `GROQ_API_KEY` to your `.env` file to generate briefings."
-
-    return brief, retrieved_memories
+def pretty_date(iso: str) -> str:
+    parsed = date.fromisoformat(str(iso)[:10])
+    return f"{parsed.day} {parsed.strftime('%b %Y')}"
 
 
-SECTION_RE = re.compile(
-    r"^[ \t]*(?:#{1,4}[ \t]*)?([1-6])\.[ \t]*\*{0,2}([^\n*:]+?)\*{0,2}[ \t]*:?[ \t]*\*{0,2}[ \t]*(.*)$",
-    re.M,
-)
+def money(value: int) -> str:
+    if not value:
+        return "Value not set"
+    return format_inr(value).replace("Rs ", "₹")
 
 
-def parse_sections(text):
-    matches = list(SECTION_RE.finditer(text))
-    if len(matches) < 3:
-        return []
-    sections = []
-    for idx, m in enumerate(matches):
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        body = (m.group(3) + "\n" + text[m.end():end]).strip()
-        sections.append((int(m.group(1)), m.group(2).strip(), body))
-    return sections
+def badge_class(label: str) -> str:
+    text = label.lower()
+    if "demo" in text:
+        return "b-demo"
+    if "email" in text:
+        return "b-email"
+    if "meeting" in text or "session" in text or "commercial" in text:
+        return "b-meeting"
+    return "b-call"
 
 
-def render_brief(text):
+def render_brief(text: str, key_prefix: str) -> None:
     sections = parse_sections(text)
     if not sections:
-        with st.container(key="panel_raw"):
-            st.markdown(text)
+        st.markdown(text)
         return
+    used: set[str] = set()
 
-    def card(num, title, body):
-        with st.container(key=f"sec_{num}"):
+    def card(num: int, title: str, body: str) -> None:
+        key = f"{key_prefix}-{num}"
+        while key in used:
+            key += "x"
+        used.add(key)
+        with st.container(key=key):
             st.markdown(f"<div class='sec-title'>{esc(title)}</div>", unsafe_allow_html=True)
             st.markdown(body)
 
     card(*sections[0])
     rest = sections[1:]
-    for i in range(0, len(rest), 2):
+    for index in range(0, len(rest), 2):
         cols = st.columns(2, gap="medium")
-        for col, sec in zip(cols, rest[i:i + 2]):
+        for col, section in zip(cols, rest[index : index + 2]):
             with col:
-                card(*sec)
+                card(*section)
 
 
-# ─────────────────────────────────────────────────────────────
-# SIDEBAR
-# ─────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### Connections")
-    st.markdown(
-        f"<span class='pill {'on' if groq_client else 'off'}'>{'●' if groq_client else '○'} Groq {'connected' if groq_client else 'missing key'}</span>"
-        f"<span class='pill {'on' if HINDSIGHT_API_KEY else 'off'}'>{'●' if HINDSIGHT_API_KEY else '○'} Hindsight {'live' if HINDSIGHT_API_KEY else 'local only'}</span>",
-        unsafe_allow_html=True,
-    )
-    st.caption(f"Model: `{GROQ_MODEL}`")
-    st.markdown("### How it works")
-    st.markdown(
-        "1. **Log** every call, demo and email.\n"
-        "2. **Recall** pulls the relevant history for a deal.\n"
-        "3. **Brief** turns it into a tactical plan before you dial."
-    )
+def render_memories(memories: list[dict]) -> None:
+    if not memories:
+        st.caption("No memories came back.")
+        return
+    for number, item in enumerate(memories, 1):
+        kind = (item.get("type") or "memory").upper()
+        css = "mem play" if "playbook" in item.get("tags", []) else "mem"
+        st.markdown(
+            f"<div class='{css}'><small>{esc(kind)} {number}</small><br>{esc(item['text'])}</div>",
+            unsafe_allow_html=True,
+        )
 
-# ─────────────────────────────────────────────────────────────
-# HERO
-# ─────────────────────────────────────────────────────────────
-total = len(st.session_state["interactions"])
-open_items = sum(
-    1 for i in st.session_state["interactions"]
-    if any(k in (i["outcome"] + i["notes"]).lower() for k in ("promised", "awaiting", "before friday", "send"))
-)
+
+def render_trace(trace: list[dict]) -> None:
+    if not trace:
+        return
+    with st.expander("How the agent used memory"):
+        for step in trace:
+            status = "ok" if step.get("ok") else "failed"
+            detail = step.get("error") or step.get("note") or ""
+            count = step.get("count")
+            extra = f" · {count} items" if count is not None else ""
+            st.markdown(f"**{esc(step.get('tool'))}** · {status}{extra}")
+            if detail:
+                st.caption(detail)
+
+
+def prepare_bank(memory: Memory | None) -> None:
+    if memory is None:
+        return
+    if "bank_ready" not in st.session_state:
+        with st.spinner("Connecting the Hindsight bank…"):
+            try:
+                st.session_state["bank_warnings"] = memory.ensure_bank()
+                st.session_state["bank_ready"] = True
+                st.session_state.pop("seed_error", None)
+            except Exception as exc:
+                st.session_state["bank_error"] = str(exc)
+                return
+    if st.session_state.get("bank_error"):
+        return
+    if store.meta_get("hindsight_seeded") == "1":
+        if "synced_pending" not in st.session_state:
+            try:
+                st.session_state["synced_count"] = memory.sync_pending(store)
+            except Exception as exc:
+                st.session_state["sync_error"] = str(exc)
+            st.session_state["synced_pending"] = True
+        return
+    if st.session_state.get("seed_error"):
+        return
+    with st.spinner("Teaching Hindsight the sample pipeline. The first run can take a few minutes…"):
+        try:
+            st.session_state["seed_count"] = memory.install_sample(store)
+            st.session_state.pop("seed_error", None)
+        except Exception as exc:
+            st.session_state["seed_error"] = str(exc)
+
+
+memory = connect_memory()
+client = groq_client()
+prepare_bank(memory)
+
+hindsight_on = memory is not None and bool(st.session_state.get("bank_ready"))
+seeded = store.meta_get("hindsight_seeded") == "1"
+deals = store.deals()
+open_promises = store.commitments(status="open")
+overdue = [item for item in open_promises if is_overdue(item["due_on"])]
+overdue_by_slug: dict[str, int] = {}
+for item in overdue:
+    overdue_by_slug[item["deal_slug"]] = overdue_by_slug.get(item["deal_slug"], 0) + 1
+
+pipeline = sorted(deals, key=lambda deal: (deal["slug"] != "northwind-logistics", deal["name"]))
+if "active_slug" not in st.session_state or not any(deal["slug"] == st.session_state["active_slug"] for deal in deals):
+    st.session_state["active_slug"] = pipeline[0]["slug"] if pipeline else ""
+if not pipeline:
+    st.error("No deals in the local pipeline.")
+    st.stop()
+selected = next(deal for deal in deals if deal["slug"] == st.session_state["active_slug"])
+selected_overdue = overdue_by_slug.get(selected["slug"], 0)
+selected_notes = len(store.interactions(selected["slug"]))
+
+memory_state = "on" if hindsight_on else "off"
+memory_label = "Hindsight live" if hindsight_on else "Hindsight off"
+if hindsight_on and not seeded:
+    memory_state = "off"
+    memory_label = "Memory not loaded"
+groq_state = "on" if client else "off"
+groq_label = "Groq connected" if client else "Groq missing"
+
 st.markdown(
     f"""
-    <div class="hero">
-      <div>
-        <h1>🤝 DealRecall</h1>
-        <p>Walk into every call knowing what was said, what was promised, and what to ask next.</p>
+    <div class="topbar">
+      <div class="brand">
+        <div class="mark">DR</div>
+        <div>
+          <strong>DealRecall</strong>
+          <span>Brief the call from what the deal already said, and from what won last time.</span>
+        </div>
       </div>
-      <div class="hero-stats">
-        <div class="stat"><b>{len(deal_names())}</b><span>Active deals</span></div>
-        <div class="stat"><b>{total}</b><span>Touchpoints</span></div>
-        <div class="stat"><b>{open_items}</b><span>Open follow-ups</span></div>
+      <div class="status">
+        <span class="pill {groq_state}">{groq_label}</span>
+        <span class="pill {memory_state}">{memory_label}</span>
+        <span class="pill neutral">{esc(groq_model())}</span>
       </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-tab1, tab2, tab3 = st.tabs(["⚡ Prepare for call", "📝 Log interaction", "📜 Deal timeline"])
+flash = st.session_state.pop("flash", None)
+if flash:
+    level, text = flash
+    if level == "ok":
+        st.success(text)
+    elif level == "warn":
+        st.warning(text)
+    else:
+        st.error(text)
 
-# ─────────────────────────────────────────────────────────────
-# TAB 1 — PREPARE
-# ─────────────────────────────────────────────────────────────
-def _apply_prompt():
+if st.session_state.get("bank_error"):
+    st.error(f"Hindsight could not be reached: {st.session_state['bank_error']}")
+    if st.button("Retry connection"):
+        st.session_state.pop("bank_error", None)
+        st.session_state.pop("bank_ready", None)
+        st.rerun()
+
+if st.session_state.get("seed_error"):
+    st.error(
+        "The sample pipeline was not retained. Briefings will have nothing to recall until this succeeds. "
+        f"{st.session_state['seed_error']}"
+    )
+    if st.button("Retry loading sample pipeline"):
+        st.session_state.pop("seed_error", None)
+        st.rerun()
+
+for warning in st.session_state.get("bank_warnings") or []:
+    st.caption(warning)
+
+card_cols = st.columns(len(pipeline))
+for column, deal in zip(card_cols, pipeline):
+    hot = overdue_by_slug.get(deal["slug"], 0)
+    hot_html = f" · <span class='hot-inline'>{hot} overdue</span>" if hot else ""
+    value = money(deal["value_inr"])
+    active = deal["slug"] == selected["slug"]
+    with column:
+        with st.container(key=("dcardon_" if active else "dcardoff_") + deal["slug"]):
+            st.markdown(
+                f"<p class='deal-stage'>{esc(deal['stage'])}</p>"
+                f"<p class='deal-name'>{esc(deal['name'])}</p>"
+                f"<p class='deal-meta'>{esc(value)}{hot_html}</p>",
+                unsafe_allow_html=True,
+            )
+            if active:
+                st.markdown("<div class='in-view'>In view</div>", unsafe_allow_html=True)
+            elif st.button("Open", key=f"sel_{deal['slug']}"):
+                st.session_state["active_slug"] = deal["slug"]
+                st.rerun()
+
+if selected["slug"] == "northwind-logistics":
+    story = "CFO call with Anil Deshpande is 30 September. Priya Shah is the champion. Raj Malhotra is waiting on security."
+elif selected["stage"] == "Closed won":
+    story = "Closed. Tactics from this deal are what the next briefing should reuse."
+elif selected["stage"] == "Closed lost":
+    story = "Lost. The miss stays in the playbook so the next deal does not repeat it."
+else:
+    story = selected["segment"]
+
+flag_html = ""
+if selected_overdue:
+    flag_html += f"<span class='flag hot'>{selected_overdue} overdue</span>"
+flag_html += f"<span class='flag'>{selected_notes} touchpoints</span>"
+if selected["value_inr"]:
+    flag_html += f"<span class='flag'>{esc(money(selected['value_inr']))}</span>"
+
+st.markdown(
+    f"""
+    <div class="context">
+      <div>
+        <div class="kicker">{esc(selected['stage'])}</div>
+        <h2>{esc(selected['name'])}</h2>
+        <p>{esc(story)}</p>
+      </div>
+      <div class="flags">{flag_html}</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+view = st.segmented_control(
+    "Section",
+    ["Prepare", "Timeline", "Log a call", "Memory"],
+    default="Prepare",
+    key="nav",
+    label_visibility="collapsed",
+)
+if view is None:
+    view = "Prepare"
+
+
+def apply_prompt() -> None:
     choice = st.session_state.get("quick_prompt")
     if choice:
         st.session_state["user_query"] = QUICK_PROMPTS[choice]
 
 
-with tab1:
+if view == "Prepare":
     with st.container(key="panel_prepare"):
-        st.subheader("Get a pre-call briefing")
-        c1, c2 = st.columns([1, 2], gap="medium")
-        with c1:
-            deal_selected = st.selectbox("Deal", deal_names())
-        with c2:
-            if "user_query" not in st.session_state:
-                st.session_state["user_query"] = "How should I prepare for my next call?"
-            st.text_input("What do you need help with?", key="user_query")
-
+        if "user_query" not in st.session_state:
+            st.session_state["user_query"] = QUICK_PROMPTS["Prep the call"]
+        st.text_input("What do you need before the call?", key="user_query")
         st.pills(
-            "Quick prompts", list(QUICK_PROMPTS.keys()), key="quick_prompt",
-            on_change=_apply_prompt, label_visibility="collapsed",
+            "Quick prompts",
+            list(QUICK_PROMPTS.keys()),
+            key="quick_prompt",
+            on_change=apply_prompt,
+            label_visibility="collapsed",
         )
-        go = st.button("Generate briefing", type="primary")
+        go_col, compare_col, _spacer = st.columns([1.15, 1.35, 2])
+        with go_col:
+            go = st.button("Brief from memory", type="primary", disabled=not (client and hindsight_on))
+        with compare_col:
+            compare = st.button("Compare with no memory", disabled=not client)
+        if not client:
+            st.caption("Add GROQ_API_KEY to .env to write a briefing.")
+        elif not hindsight_on:
+            st.caption("Hindsight is off. A generic brief is still available.")
 
-    if go:
-        with st.spinner("Recalling deal history and building your plan…"):
-            brief, mems = prepare_brief(deal_selected, st.session_state["user_query"])
-        st.session_state["last_brief"] = {"deal": deal_selected, "brief": brief, "memories": mems}
+    question = st.session_state["user_query"].strip()
 
-    result = st.session_state["last_brief"]
-    if result:
-        st.markdown(f"### Briefing: {esc(result['deal'])}")
-        render_brief(result["brief"])
-        with st.expander(f"🔍 Memories used ({len(result['memories'])})"):
-            if result["memories"]:
-                for n, mem in enumerate(result["memories"], 1):
-                    st.markdown(f"<div class='mem'><small>Memory {n}</small><br>{esc(mem)}</div>", unsafe_allow_html=True)
-            else:
-                st.write("No memories found for this deal.")
+    if (go or compare) and not question:
+        st.error("Ask something before generating a briefing.")
+    elif go or compare:
+        try:
+            with st.spinner("Recalling deal history and tactics from other deals…"):
+                memory_brief = None
+                if go or (compare and hindsight_on and memory is not None):
+                    memory_brief = run_brief(
+                        groq_client=client,
+                        memory=memory,
+                        store=store,
+                        deal=selected,
+                        question=question,
+                        use_memory=True,
+                    )
+                generic_brief = None
+                if compare:
+                    with st.spinner("Writing the same brief with no memory…"):
+                        generic_brief = run_brief(
+                            groq_client=client,
+                            memory=memory,
+                            store=store,
+                            deal=selected,
+                            question=question,
+                            use_memory=False,
+                        )
+            st.session_state["brief"] = {
+                "deal": selected["slug"],
+                "question": question,
+                "memory": memory_brief,
+                "generic": generic_brief,
+            }
+        except Exception as exc:
+            st.error(str(exc))
+
+    result = st.session_state.get("brief")
+    if result and result["deal"] == selected["slug"]:
+        memory_brief = result["memory"]
+        generic_brief = result["generic"]
+        if memory_brief and generic_brief:
+            mem_col, gen_col = st.columns(2, gap="medium")
+            with mem_col:
+                st.markdown(
+                    "<div class='col-label'>With Hindsight<span>Deal facts plus tactics from deals you already closed</span></div>",
+                    unsafe_allow_html=True,
+                )
+                render_brief(memory_brief.text, "mem")
+            with gen_col:
+                st.markdown(
+                    "<div class='col-label'>Without memory<span>Same question. No retain, no recall.</span></div>",
+                    unsafe_allow_html=True,
+                )
+                render_brief(generic_brief.text, "gen")
+        elif memory_brief:
+            st.markdown(f"### Briefing: {esc(selected['name'])}")
+            render_brief(memory_brief.text, "mem")
+        elif generic_brief:
+            st.markdown(f"### Generic briefing: {esc(selected['name'])}")
+            render_brief(generic_brief.text, "gen")
+
+        if memory_brief:
+            render_trace(memory_brief.trace)
+            with st.expander(f"Memories used ({len(memory_brief.memories)})"):
+                render_memories(memory_brief.memories)
+            if hindsight_on and st.button("Ask Hindsight to reflect"):
+                with st.spinner("Hindsight is reasoning over the bank…"):
+                    try:
+                        st.session_state["reflection"] = {
+                            "slug": selected["slug"],
+                            "text": memory.reflect(selected["name"], question),
+                        }
+                    except Exception as exc:
+                        st.error(f"Reflect failed: {exc}")
+            reflection = st.session_state.get("reflection")
+            if reflection and reflection.get("slug") == selected["slug"] and memory_brief:
+                st.markdown("#### Hindsight reflect")
+                st.markdown(reflection["text"])
     else:
         st.markdown(
-            "<div class='empty'><b>Your briefing will appear here</b>Pick a deal, choose a quick prompt, then select Generate briefing.</div>",
+            f"<div class='empty'><b>Brief {esc(selected['name'])} from memory</b>"
+            "The generic brief only knows the company name. Memory can name the people, the open promises, and the tactic that won on another deal."
+            "<div class='steps'>"
+            "<div class='step'><b>1. Ask</b><span>Leave the question, or pick a prompt.</span></div>"
+            "<div class='step'><b>2. Compare</b><span>Same question, with Hindsight and without it.</span></div>"
+            "<div class='step'><b>3. Show the trace</b><span>Open the tool calls so the recall is visible.</span></div>"
+            "</div></div>",
             unsafe_allow_html=True,
         )
 
-# ─────────────────────────────────────────────────────────────
-# TAB 2 — LOG
-# ─────────────────────────────────────────────────────────────
-with tab2:
-    st.subheader("Log a touchpoint")
-    st.caption("The more detail you save now, the sharper your next briefing.")
-    with st.form("add_interaction_form", clear_on_submit=True):
+
+elif view == "Log a call":
+    st.markdown("<div class='section-label'>Log a touchpoint</div>", unsafe_allow_html=True)
+    st.caption(f"This saves on {selected['name']} and retains the same note in Hindsight.")
+    open_for_deal = store.commitments(selected["slug"], status="open")
+    promise_labels = {
+        f"{item['what']} (due {item['due_on']})": item["id"] for item in open_for_deal
+    }
+
+    with st.form("log_form", clear_on_submit=True):
+        st.markdown("<div class='form-label'>Conversation</div>", unsafe_allow_html=True)
+        new_company = st.text_input("New company", placeholder="Leave blank to use the deal in view")
         col_a, col_b = st.columns(2, gap="medium")
         with col_a:
-            d_name = st.text_input("Company / deal name", value=deal_names()[0])
-            contact_person = st.text_input("Contact name and role", placeholder="e.g. Priya Shah (VP Operations)")
+            contact = st.text_input("Contact name and role", placeholder="Priya Shah (VP Operations)")
+            happened = st.date_input("When it happened", value=date.today())
+            result_label = st.selectbox("Result", ["Advanced", "Still open", "Won", "Lost"])
         with col_b:
-            itype = st.selectbox("Interaction type", ["Call", "Meeting", "Email", "Demo"])
-            outcome_text = st.text_input("Outcome / next step", placeholder="e.g. Send proposal by Friday")
-
-        notes_text = st.text_area(
+            interaction_type = st.selectbox(
+                "Interaction type",
+                ["Discovery call", "Product demo", "Follow-up email", "Working session", "Commercial call"],
+            )
+            outcome = st.text_input("Outcome / next step", placeholder="Commercial call with the CFO on 30 September")
+            tactic = st.text_input(
+                "Tactic you tried",
+                placeholder="Sent a two-page security brief 48 hours ahead",
+            )
+        notes = st.text_area(
             "Notes",
             height=140,
-            placeholder="Objections, stakeholders, competitors, commitments you made…",
+            placeholder="Who said what, which competitor came up, what you promised.",
         )
+        st.markdown("<div class='form-label'>Promise</div>", unsafe_allow_html=True)
+        p1, p2, p3 = st.columns([2, 1, 1])
+        with p1:
+            promise_what = st.text_input("Promise", label_visibility="collapsed", placeholder="What you promised")
+        with p2:
+            promise_who = st.text_input("To whom", label_visibility="collapsed", placeholder="Who")
+        with p3:
+            promise_due = st.date_input("Due", label_visibility="collapsed", value=date.today())
+        kept = st.multiselect("Mark promises kept", list(promise_labels))
         submitted = st.form_submit_button("Save to memory", type="primary")
-        if submitted:
-            if d_name.strip() and notes_text.strip():
-                retain_interaction(d_name.strip(), contact_person, itype, notes_text, outcome_text)
-                st.success(f"Saved. {d_name.strip()} now has {sum(1 for i in st.session_state['interactions'] if i['deal_name'] == d_name.strip())} touchpoints in memory.")
+
+    if submitted:
+        company = new_company.strip() or selected["name"]
+        if not company or not notes.strip():
+            st.error("Add notes, and a company name.")
+        else:
+            deal = store.ensure_deal(company)
+            result_map = {"Advanced": "advanced", "Still open": "open", "Won": "won", "Lost": "lost"}
+            result = result_map[result_label]
+            kept_ids = []
+            if not new_company.strip():
+                kept_ids = [promise_labels[label] for label in kept]
+            kept_text = ""
+            if kept_ids:
+                kept_text = " Promises marked kept: " + "; ".join(kept) + "."
+                for commitment_id in kept_ids:
+                    store.set_commitment_status(commitment_id, "done")
+            if promise_what.strip():
+                store.add_commitment(deal["slug"], promise_what, promise_who or "Unspecified", promise_due.isoformat())
+            if result == "won":
+                store.set_stage(deal["slug"], "Closed won")
+            elif result == "lost":
+                store.set_stage(deal["slug"], "Closed lost")
+            row = store.add_interaction(
+                document_id=f"log-{uuid.uuid4().hex}",
+                deal_slug=deal["slug"],
+                happened_on=happened.isoformat(),
+                contact=contact.strip(),
+                type_=interaction_type,
+                notes=notes.strip() + kept_text,
+                outcome=outcome.strip(),
+                tactic=tactic.strip(),
+                result=result,
+            )
+            st.session_state["active_slug"] = deal["slug"]
+            if memory is None or not st.session_state.get("bank_ready"):
+                st.session_state["flash"] = (
+                    "warn",
+                    "Saved on this machine only. Hindsight is not connected, so the next briefing cannot recall it.",
+                )
             else:
-                st.error("Add a company name and notes to save this touchpoint.")
-
-# ─────────────────────────────────────────────────────────────
-# TAB 3 — TIMELINE
-# ─────────────────────────────────────────────────────────────
-def badge_class(t):
-    t = t.lower()
-    if "demo" in t:
-        return "b-demo"
-    if "email" in t:
-        return "b-email"
-    if "meeting" in t:
-        return "b-meeting"
-    return "b-call"
+                try:
+                    with st.spinner("Retaining this interaction in Hindsight…"):
+                        memory.retain_interaction(deal, row)
+                    store.mark_retained([row["document_id"]])
+                    st.session_state["flash"] = ("ok", f"Saved. {deal['name']} can be recalled on the next briefing.")
+                except Exception as exc:
+                    st.session_state["flash"] = ("warn", f"Saved locally. Hindsight did not retain it: {exc}")
+            st.rerun()
 
 
-with tab3:
-    st.subheader("Deal timeline")
-    filter_deal = st.selectbox("Deal", deal_names(), key="timeline_filter")
-    filtered = [i for i in st.session_state["interactions"] if i["deal_name"] == filter_deal]
-    if not filtered:
+elif view == "Timeline":
+    deal_promises = store.commitments(selected["slug"])
+    if deal_promises:
+        st.markdown("<div class='section-label'>Promises</div>", unsafe_allow_html=True)
+        cards = []
+        for item in deal_promises:
+            overdue_item = item["status"] == "open" and is_overdue(item["due_on"])
+            badge = "b-over" if overdue_item else "b-done" if item["status"] == "done" else "b-open"
+            label = "Overdue" if overdue_item else item["status"].capitalize()
+            cards.append(
+                f"<div class='promise'><span class='badge {badge}'>{label}</span> "
+                f"<strong>{esc(item['what'])}</strong>"
+                f"<span class='tl-date'>To {esc(item['who'])} · due {esc(pretty_date(item['due_on']))}</span></div>"
+            )
+        st.markdown(f"<div class='promise-row'>{''.join(cards)}</div>", unsafe_allow_html=True)
+    rows = store.interactions(selected["slug"])
+    if not rows:
         st.markdown(
-            "<div class='empty'><b>No touchpoints yet</b>Log your first interaction to start this deal's timeline.</div>",
+            "<div class='empty'><b>No touchpoints yet</b>Log the first conversation to start this timeline.</div>",
             unsafe_allow_html=True,
         )
     else:
-        items = "".join(
-            f"""
-            <div class="tl-item">
-              <div class="tl-head">
-                <span class="badge {badge_class(it['type'])}">{esc(it['type'])}</span>
-                <span class="tl-contact">{esc(it['contact'])}</span>
-              </div>
-              <p><b>Notes</b><br>{esc(it['notes'])}</p>
-              <p><b>Outcome</b><br>{esc(it['outcome'])}</p>
-            </div>"""
-            for it in reversed(filtered)
+        st.markdown("<div class='section-label'>Touchpoints</div>", unsafe_allow_html=True)
+        result_badge = {
+            "won": ("Won", "b-done"),
+            "lost": ("Lost", "b-over"),
+            "open": ("Open", "b-open"),
+            "advanced": ("Advanced", "b-call"),
+        }
+        items = []
+        for item in reversed(rows):
+            tactic = f"<p><b>Tactic</b><br>{esc(item['tactic'])}</p>" if item["tactic"] else ""
+            result_label, result_class = result_badge.get(item["result"], ("", ""))
+            result_html = f"<span class='badge {result_class}'>{result_label}</span>" if result_label else ""
+            items.append(
+                f"""
+                <div class="tl-item">
+                  <div class="tl-head">
+                    <span class="badge {badge_class(item['type'])}">{esc(item['type'])}</span>
+                    {result_html}
+                    <span class="tl-date">{esc(pretty_date(item['happened_on']))}</span>
+                    <span class="tl-contact">{esc(item['contact'])}</span>
+                  </div>
+                  <p><b>Notes</b><br>{esc(item['notes'])}</p>
+                  <p><b>Outcome</b><br>{esc(item['outcome'])}</p>
+                  {tactic}
+                </div>
+                """
+            )
+        st.markdown(f"<div class='tl'>{''.join(items)}</div>", unsafe_allow_html=True)
+
+elif view == "Memory":
+    st.markdown("<div class='section-label'>What Hindsight holds</div>", unsafe_allow_html=True)
+    st.caption("Deal facts stay on this deal. Lessons from wins and losses live in the playbook.")
+    if not hindsight_on:
+        st.markdown(
+            "<div class='empty'><b>Hindsight is not connected</b>"
+            "Add HINDSIGHT_API_KEY to your .env file. The timeline still works without it. Briefings from memory do not.</div>",
+            unsafe_allow_html=True,
         )
-        st.markdown(f"<div class='tl'>{items}</div>", unsafe_allow_html=True)
+    else:
+        if st.button("Recall this deal and the playbook", type="primary"):
+            with st.spinner("Recalling…"):
+                try:
+                    st.session_state["memory_view"] = {
+                        "slug": selected["slug"],
+                        "deal": memory.recall_deal(selected["slug"], "stakeholders objections competitors promises pricing"),
+                        "playbook": memory.recall_playbook(
+                            "which tactics won or lost on pricing, security reviews, competitors, and missing buyers"
+                        ),
+                    }
+                except Exception as exc:
+                    st.error(f"Recall failed: {exc}")
+        recalled = st.session_state.get("memory_view")
+        if recalled and recalled["slug"] == selected["slug"]:
+            deal_col, play_col = st.columns(2, gap="medium")
+            with deal_col:
+                st.markdown(
+                    "<div class='col-label'>This deal<span>Tagged so other accounts cannot leak in</span></div>",
+                    unsafe_allow_html=True,
+                )
+                render_memories(recalled["deal"])
+            with play_col:
+                st.markdown(
+                    "<div class='col-label'>Playbook<span>What already won or lost somewhere else</span></div>",
+                    unsafe_allow_html=True,
+                )
+                render_memories(recalled["playbook"])
+        else:
+            st.markdown(
+                "<div class='empty'><b>Nothing recalled yet</b>Load this deal to see the facts and the lessons side by side.</div>",
+                unsafe_allow_html=True,
+            )
