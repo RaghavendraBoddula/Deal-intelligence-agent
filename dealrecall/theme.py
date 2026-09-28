@@ -122,6 +122,10 @@ div[data-testid="stVerticalBlock"] { gap: 0.7rem; }
 [class*="st-key-mem-"] li, [class*="st-key-mem-"] p,
 [class*="st-key-gen-"] li, [class*="st-key-gen-"] p { line-height: 1.55; font-size: .94rem; }
 
+.ready {
+  background: var(--teal-soft); color: var(--teal-deep); border-radius: 12px;
+  padding: 0.55rem 0.85rem; font-weight: 700; margin: 0.15rem 0 0.55rem;
+}
 .col-label { font-family: 'Fraunces', serif; font-weight: 700; font-size: 1.2rem; margin: .2rem 0 .55rem; }
 .col-label span { display: block; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 500; font-size: .8rem; color: var(--ink-soft); margin-top: 0.15rem; }
 

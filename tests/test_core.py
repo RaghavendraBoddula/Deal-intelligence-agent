@@ -3,7 +3,15 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-from dealrecall.agent import dispatch_tool, parse_sections, parse_tool_arguments, strip_think
+from dealrecall.agent import (
+    BriefError,
+    dispatch_tool,
+    friendly_service_error,
+    parse_sections,
+    parse_tool_arguments,
+    run_brief,
+    strip_think,
+)
 from dealrecall.seed import memory_items
 from dealrecall.store import Store, format_inr, is_overdue, slugify
 
@@ -124,6 +132,8 @@ class SeedTests(unittest.TestCase):
         playbook = [item for item in items if item["tags"] == ["playbook"]]
         self.assertEqual(len(deal_items), 5)
         self.assertEqual(len(playbook), 4)
+        security = next(item for item in playbook if item["document_id"] == "seed-playbook-security")
+        self.assertEqual(security["metadata"]["deal"], "Meridian Health")
         self.assertTrue(all(item["document_id"] for item in items))
 
     def test_slug_and_money(self):
@@ -143,6 +153,181 @@ class FakeMemory:
 
     def recall_playbook(self, question):
         return [{"text": "Meridian refused the discount", "type": "experience", "tags": ["playbook"]}]
+
+
+class BriefFlowTests(unittest.TestCase):
+    SAMPLE = (
+        "1. Deal Summary\nWaiting on security.\n"
+        "2. Stakeholders\nPriya Shah is the champion.\n"
+        "3. Objections\nSecurity and price.\n"
+        "4. Competitor\nCargoFlow is cheaper.\n"
+        "5. Open Promises\nSecurity brief for Raj.\n"
+        "6. Recommended Questions\n- What does Anil need?\n- Has Raj read the note?\n- Is the case study enough?\n"
+    )
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self.dir.name) / "deals.db")
+        self.deal = self.store.get_deal("northwind-logistics")
+        self.memory = ScriptedMemory(
+            [
+                {
+                    "text": "Raj Malhotra is waiting on a security brief.",
+                    "type": "world",
+                    "tags": ["deal:northwind-logistics"],
+                    "metadata": {"deal": "Northwind Logistics"},
+                }
+            ],
+            [
+                {
+                    "text": "Meridian Health refused a discount and won at list price.",
+                    "type": "experience",
+                    "tags": ["playbook"],
+                    "metadata": {},
+                }
+            ],
+        )
+        self.groq = ScriptedGroq(self.SAMPLE)
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_memory_brief_recalls_then_generates(self):
+        labels = []
+        brief = run_brief(
+            groq_client=self.groq,
+            memory=self.memory,
+            store=self.store,
+            deal=self.deal,
+            question="How should I prepare for the 30 September call?",
+            use_memory=True,
+            on_progress=labels.append,
+        )
+        self.assertEqual(self.memory.deal_calls, 1)
+        self.assertEqual(self.memory.play_calls, 1)
+        self.assertEqual(len(self.groq.calls), 1)
+        self.assertNotIn("tools", self.groq.calls[0])
+        sent = self.groq.calls[0]["messages"][1]["content"]
+        self.assertIn("Raj Malhotra is waiting on a security brief.", sent)
+        self.assertIn("Meridian Health refused a discount", sent)
+        self.assertEqual(brief.memories[0]["source"], "Northwind Logistics")
+        self.assertEqual(brief.memories[0]["relevance"], "High")
+        self.assertEqual(brief.memories[1]["source"], "Cross-deal playbook")
+        self.assertIn("Hindsight memory recalled", [step["label"] for step in brief.trace])
+        self.assertIn("Recalling deal history…", labels)
+        self.assertIn("Building your pre-call brief…", labels)
+        self.assertIn("Priya Shah", brief.text)
+
+    def test_same_flow_twice(self):
+        for _ in range(2):
+            brief = run_brief(
+                groq_client=self.groq,
+                memory=self.memory,
+                store=self.store,
+                deal=self.deal,
+                question="Prepare the call",
+                use_memory=True,
+            )
+            self.assertTrue(brief.used_memory)
+            self.assertGreaterEqual(len(brief.memories), 2)
+
+    def test_no_memory_brief_does_not_receive_history(self):
+        brief = run_brief(
+            groq_client=self.groq,
+            memory=self.memory,
+            store=self.store,
+            deal=self.deal,
+            question="Prepare the call",
+            use_memory=False,
+        )
+        self.assertEqual(self.memory.deal_calls, 0)
+        blob = " ".join(message["content"] for message in self.groq.calls[0]["messages"])
+        self.assertNotIn("Raj Malhotra is waiting", blob)
+        self.assertNotIn("Meridian Health refused", blob)
+        self.assertIn("Northwind Logistics", blob)
+        self.assertFalse(brief.used_memory)
+
+    def test_hindsight_timeout_does_not_call_groq(self):
+        self.memory.boom = True
+        with self.assertRaises(BriefError) as caught:
+            run_brief(
+                groq_client=self.groq,
+                memory=self.memory,
+                store=self.store,
+                deal=self.deal,
+                question="Prepare the call",
+                use_memory=True,
+            )
+        self.assertIn("did not respond in time", caught.exception.message)
+        self.assertNotIn("Traceback", caught.exception.message)
+        self.assertEqual(self.groq.calls, [])
+
+    def test_empty_hindsight_does_not_invent_a_brief(self):
+        self.memory.deal_items = []
+        self.memory.play_items = []
+        with self.assertRaises(BriefError) as caught:
+            run_brief(
+                groq_client=self.groq,
+                memory=self.memory,
+                store=self.store,
+                deal=self.deal,
+                question="Prepare the call",
+                use_memory=True,
+            )
+        self.assertIn("no memories", caught.exception.message)
+        self.assertEqual(self.groq.calls, [])
+
+    def test_empty_groq_response(self):
+        self.groq.content = "   "
+        with self.assertRaises(BriefError) as caught:
+            run_brief(
+                groq_client=self.groq,
+                memory=self.memory,
+                store=self.store,
+                deal=self.deal,
+                question="Prepare the call",
+                use_memory=True,
+            )
+        self.assertIn("empty brief", caught.exception.message)
+
+    def test_friendly_errors_hide_traces(self):
+        self.assertIn("key was rejected", friendly_service_error(RuntimeError("401 unauthorized"), "Hindsight"))
+        message = friendly_service_error(ConnectionError("failed to establish a connection"), "Hindsight")
+        self.assertIn("Hindsight is unavailable right now", message)
+        self.assertNotIn("Traceback", friendly_service_error(RuntimeError('Traceback (most recent call last):\n  File "x.py"'), "Groq"))
+
+
+class ScriptedMemory:
+    def __init__(self, deal_items, play_items):
+        self.deal_items = deal_items
+        self.play_items = play_items
+        self.deal_calls = 0
+        self.play_calls = 0
+        self.boom = False
+
+    def recall_deal(self, slug, question):
+        self.deal_calls += 1
+        if self.boom:
+            raise TimeoutError("request timed out")
+        return list(self.deal_items)
+
+    def recall_playbook(self, question):
+        self.play_calls += 1
+        return list(self.play_items)
+
+
+class ScriptedGroq:
+    def __init__(self, content):
+        self.content = content
+        self.calls = []
+        self.chat = self
+        self.completions = self
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        message = type("Message", (), {"content": self.content})()
+        choice = type("Choice", (), {"message": message})()
+        return type("Response", (), {"choices": [choice]})()
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from groq import Groq
 
-from dealrecall.agent import groq_model, parse_sections, run_brief
+from dealrecall.agent import BriefError, friendly_service_error, groq_model, parse_sections, run_brief
 from dealrecall.memory import Memory
 from dealrecall.store import Store, format_inr, is_overdue
 from dealrecall.theme import CSS
@@ -54,7 +54,7 @@ def esc(value) -> str:
 
 def groq_client():
     key = os.getenv("GROQ_API_KEY", "").strip()
-    return Groq(api_key=key) if key else None
+    return Groq(api_key=key, timeout=90.0) if key else None
 
 
 def connect_memory() -> Memory | None:
@@ -112,11 +112,14 @@ def render_memories(memories: list[dict]) -> None:
     if not memories:
         st.caption("No memories came back.")
         return
-    for number, item in enumerate(memories, 1):
+    for item in memories:
         kind = (item.get("type") or "memory").upper()
         css = "mem play" if "playbook" in item.get("tags", []) else "mem"
+        source = item.get("source") or "Hindsight"
+        relevance = item.get("relevance") or "Supporting"
         st.markdown(
-            f"<div class='{css}'><small>{esc(kind)} {number}</small><br>{esc(item['text'])}</div>",
+            f"<div class='{css}'><small>{esc(kind)} · {esc(source)} · Relevance {esc(relevance)}</small>"
+            f"<br>{esc(item.get('text'))}</div>",
             unsafe_allow_html=True,
         )
 
@@ -125,12 +128,10 @@ def render_trace(trace: list[dict]) -> None:
     if not trace:
         return
     with st.expander("How the agent used memory"):
-        for step in trace:
-            status = "ok" if step.get("ok") else "failed"
-            detail = step.get("error") or step.get("note") or ""
-            count = step.get("count")
-            extra = f" · {count} items" if count is not None else ""
-            st.markdown(f"**{esc(step.get('tool'))}** · {status}{extra}")
+        for number, step in enumerate(trace, 1):
+            status = "done" if step.get("ok") else "failed"
+            detail = step.get("detail") or ""
+            st.markdown(f"{number}. **{esc(step.get('label') or step.get('tool') or 'Step')}** — {status}")
             if detail:
                 st.caption(detail)
 
@@ -326,52 +327,78 @@ if view == "Prepare":
             on_change=apply_prompt,
             label_visibility="collapsed",
         )
-        go_col, compare_col, _spacer = st.columns([1.15, 1.35, 2])
+        go_col, compare_col, _spacer = st.columns([1.35, 1.45, 1.6])
         with go_col:
-            go = st.button("Brief from memory", type="primary", disabled=not (client and hindsight_on))
+            go = st.button("Brief from Memory", type="primary", disabled=not (client and hindsight_on))
         with compare_col:
             compare = st.button("Compare with no memory", disabled=not client)
         if not client:
-            st.caption("Add GROQ_API_KEY to .env to write a briefing.")
+            st.caption("Add GROQ_API_KEY to .env. AI generation is unavailable until then.")
         elif not hindsight_on:
-            st.caption("Hindsight is off. A generic brief is still available.")
+            st.caption(
+                "Hindsight is unavailable right now. Your saved deal information is still available, "
+                "but memory-based preparation could not be generated."
+            )
 
     question = st.session_state["user_query"].strip()
 
     if (go or compare) and not question:
         st.error("Ask something before generating a briefing.")
     elif go or compare:
+        memory_brief = None
+        generic_brief = None
+        memory_error = None
+        generic_error = None
         try:
-            with st.spinner("Recalling deal history and tactics from other deals…"):
-                memory_brief = None
+            with st.status("Recalling deal history…", expanded=True) as status:
+                def on_progress(label: str) -> None:
+                    status.update(label=label)
+
                 if go or (compare and hindsight_on and memory is not None):
-                    memory_brief = run_brief(
-                        groq_client=client,
-                        memory=memory,
-                        store=store,
-                        deal=selected,
-                        question=question,
-                        use_memory=True,
-                    )
-                generic_brief = None
-                if compare:
-                    with st.spinner("Writing the same brief with no memory…"):
-                        generic_brief = run_brief(
+                    try:
+                        memory_brief = run_brief(
                             groq_client=client,
                             memory=memory,
                             store=store,
                             deal=selected,
                             question=question,
-                            use_memory=False,
+                            use_memory=True,
+                            on_progress=on_progress,
                         )
+                    except BriefError as exc:
+                        memory_error = exc.message
+                if compare and client:
+                    try:
+                        generic_brief = run_brief(
+                            groq_client=client,
+                            memory=None,
+                            store=store,
+                            deal=selected,
+                            question=question,
+                            use_memory=False,
+                            on_progress=on_progress,
+                        )
+                    except BriefError as exc:
+                        generic_error = exc.message
+                if memory_brief:
+                    status.update(label="Memory-powered briefing ready", state="complete")
+                elif memory_error and not generic_brief:
+                    status.update(label="Preparation could not be finished", state="error")
+        except Exception:
+            memory_error = memory_error or (
+                "Preparation could not be finished. The deal record is still available. Try Brief from Memory again."
+            )
+        if memory_brief or generic_brief:
             st.session_state["brief"] = {
                 "deal": selected["slug"],
                 "question": question,
                 "memory": memory_brief,
                 "generic": generic_brief,
             }
-        except Exception as exc:
-            st.error(str(exc))
+        if memory_error:
+            st.error(memory_error)
+        if generic_error:
+            st.error(generic_error)
 
     result = st.session_state.get("brief")
     if result and result["deal"] == selected["slug"]:
@@ -381,18 +408,26 @@ if view == "Prepare":
             mem_col, gen_col = st.columns(2, gap="medium")
             with mem_col:
                 st.markdown(
-                    "<div class='col-label'>With Hindsight<span>Deal facts plus tactics from deals you already closed</span></div>",
+                    "<div class='ready'>Memory-powered briefing ready</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(
+                    "<div class='col-label'>With Hindsight Memory<span>This deal, plus tactics from deals already closed</span></div>",
                     unsafe_allow_html=True,
                 )
                 render_brief(memory_brief.text, "mem")
             with gen_col:
                 st.markdown(
-                    "<div class='col-label'>Without memory<span>Same question. No retain, no recall.</span></div>",
+                    "<div class='col-label'>Without Memory<span>Same question. No Hindsight recall.</span></div>",
                     unsafe_allow_html=True,
                 )
                 render_brief(generic_brief.text, "gen")
         elif memory_brief:
-            st.markdown(f"### Briefing: {esc(selected['name'])}")
+            st.markdown(
+                "<div class='ready'>Memory-powered briefing ready</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"### {esc(selected['name'])}")
             render_brief(memory_brief.text, "mem")
         elif generic_brief:
             st.markdown(f"### Generic briefing: {esc(selected['name'])}")
@@ -410,7 +445,7 @@ if view == "Prepare":
                             "text": memory.reflect(selected["name"], question),
                         }
                     except Exception as exc:
-                        st.error(f"Reflect failed: {exc}")
+                        st.error(friendly_service_error(exc, "Hindsight"))
             reflection = st.session_state.get("reflection")
             if reflection and reflection.get("slug") == selected["slug"] and memory_brief:
                 st.markdown("#### Hindsight reflect")

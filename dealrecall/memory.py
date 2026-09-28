@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from dealrecall.seed import memory_items
@@ -146,7 +147,7 @@ class Memory:
                 timestamp=_as_datetime(row["happened_on"]),
                 document_id=f"lesson-{row['document_id']}",
                 tags=["playbook"],
-                metadata={"kind": "playbook", "deal_slug": deal["slug"]},
+                metadata={"kind": "playbook", "deal": deal["name"], "deal_slug": deal["slug"]},
                 resolve_entities=False,
                 retain_async=False,
             )
@@ -165,31 +166,47 @@ class Memory:
 
     def recall_deal(self, slug: str, question: str) -> list[dict]:
         deal_name = slug.replace("-", " ")
-        return self._recall(
-            f"{deal_name}: {question}",
-            tags=[f"deal:{slug}"],
-            tags_match="any_strict",
-        )
+        with self._request_timeout(45):
+            return self._recall(
+                f"{deal_name}: {question}",
+                tags=[f"deal:{slug}"],
+                tags_match="any_strict",
+            )
 
     def recall_playbook(self, question: str) -> list[dict]:
-        return self._recall(
-            question,
-            tags=["playbook"],
-            tags_match="any_strict",
-        )
+        with self._request_timeout(45):
+            return self._recall(
+                question,
+                tags=["playbook"],
+                tags_match="any_strict",
+            )
 
     def reflect(self, deal_name: str, question: str) -> str:
-        answer = self.client.reflect(
-            bank_id=self.bank_id,
-            query=(
-                f"You are briefing a sales rep before a call on {deal_name}. {question} "
-                "Use this deal's facts and tactics learned from other deals. "
-                "Name the deal each tactic came from."
-            ),
-            budget="mid",
-            context="pre-call briefing",
-        )
+        with self._request_timeout(45):
+            answer = self.client.reflect(
+                bank_id=self.bank_id,
+                query=(
+                    f"You are briefing a sales rep before a call on {deal_name}. {question} "
+                    "Use this deal's facts and tactics learned from other deals. "
+                    "Name the deal each tactic came from."
+                ),
+                budget="mid",
+                context="pre-call briefing",
+            )
         return (getattr(answer, "text", None) or "").strip()
+
+    @contextmanager
+    def _request_timeout(self, seconds: float):
+        """Keep the long seed timeout, but fail a hung recall before the demo stalls."""
+        client = self.client
+        previous = getattr(client, "_timeout", None)
+        if previous is not None:
+            client._timeout = seconds
+        try:
+            yield
+        finally:
+            if previous is not None:
+                client._timeout = previous
 
     def _recall(self, query: str, *, tags: list[str], tags_match: str) -> list[dict]:
         response = self.client.recall(
@@ -205,11 +222,15 @@ class Memory:
             text = getattr(result, "text", None)
             if not text:
                 continue
+            metadata = getattr(result, "metadata", None) or {}
+            if not isinstance(metadata, dict):
+                metadata = {}
             memories.append(
                 {
                     "text": text,
                     "type": getattr(result, "type", "") or "",
                     "tags": list(getattr(result, "tags", None) or []),
+                    "metadata": {str(key): str(value) for key, value in metadata.items() if value is not None},
                 }
             )
         return memories

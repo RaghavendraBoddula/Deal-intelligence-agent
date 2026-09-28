@@ -284,6 +284,7 @@ PLAYBOOK = [
     {
         "document_id": "seed-playbook-discount",
         "happened_on": "2026-08-04",
+        "deal": "Kaveri Retail and Meridian Health",
         "content": (
             "Playbook, pricing. Do not open with a discount. On Kaveri Retail, lost "
             "28 July 2026, the rep offered 18 percent off on the second call as soon as "
@@ -296,6 +297,7 @@ PLAYBOOK = [
     {
         "document_id": "seed-playbook-security",
         "happened_on": "2026-07-09",
+        "deal": "Meridian Health",
         "content": (
             "Playbook, security reviews. A long PDF delivered in the meeting does not "
             "get read. Meera Iyer, CISO at Meridian Health, ignored a 40-page security "
@@ -306,6 +308,7 @@ PLAYBOOK = [
     {
         "document_id": "seed-playbook-buyer",
         "happened_on": "2026-07-28",
+        "deal": "Kaveri Retail and Meridian Health",
         "content": (
             "Playbook, stakeholders. Deals stall when only the champion is in the room. "
             "Kaveri Retail was lost with Neha Kapoor as the only contact. Her director "
@@ -316,6 +319,7 @@ PLAYBOOK = [
     {
         "document_id": "seed-playbook-competitor",
         "happened_on": "2026-08-04",
+        "deal": "Kaveri Retail and Meridian Health",
         "content": (
             "Playbook, competitors. When a cheaper competitor is in the deal, answer with "
             "hours saved in their actual workflow and a named customer in their industry. "
@@ -381,7 +385,7 @@ def memory_items() -> list[dict]:
                 "timestamp": f"{lesson['happened_on']}T18:00:00Z",
                 "document_id": lesson["document_id"],
                 "tags": ["playbook"],
-                "metadata": {"kind": "playbook"},
+                "metadata": {"kind": "playbook", "deal": lesson["deal"]},
                 "resolve_entities": False,
             }
         )
