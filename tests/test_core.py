@@ -10,6 +10,8 @@ from dealrecall.agent import (
     parse_sections,
     parse_tool_arguments,
     run_brief,
+    select_memories,
+    strip_memory_indexes,
     strip_think,
 )
 from dealrecall.seed import memory_items
@@ -29,8 +31,91 @@ class ParseTests(unittest.TestCase):
         text = "1. Deal Summary\nStatus is late.\n2. Key Stakeholders\nPriya.\n3. Objection Handling\nPrice."
         sections = parse_sections(text)
         self.assertEqual([number for number, _, _ in sections], [1, 2, 3])
+        self.assertEqual([title for _, title, _ in sections], ["Deal Summary", "Key Stakeholders", "Objection Handling"])
         self.assertIn("Priya", sections[1][2])
         self.assertNotIn("Price", sections[1][2])
+        self.assertNotIn("eal Summary", sections[0][2])
+
+    def test_parse_sections_keeps_all_six_headings_whole(self):
+        text = (
+            "1. Deal Summary\nWaiting on security.\n"
+            "2. Stakeholders\nPriya Shah is the champion.\n"
+            "3. Objections\nSecurity and price.\n"
+            "4. Competitor\nCargoFlow is cheaper.\n"
+            "5. Open Promises\nSecurity brief for Raj.\n"
+            "6. Recommended Questions\n- What does Anil need?\n"
+        )
+        sections = parse_sections(text)
+        self.assertEqual(
+            [title for _, title, _ in sections],
+            [
+                "Deal Summary",
+                "Stakeholders",
+                "Objections",
+                "Competitor",
+                "Open Promises",
+                "Recommended Questions",
+            ],
+        )
+        self.assertTrue(all(len(title) > 1 for _, title, _ in sections))
+        self.assertNotIn("eal Summary", sections[0][2])
+
+    def test_parse_sections_keeps_bold_title_and_same_line_body(self):
+        text = (
+            "1. **Deal Summary**: Waiting on Raj.\n"
+            "2. Stakeholders\nPriya.\n"
+            "3. Objections\nPrice.\n"
+        )
+        sections = parse_sections(text)
+        self.assertEqual(sections[0][1], "Deal Summary")
+        self.assertTrue(sections[0][2].startswith("Waiting on Raj."))
+
+    def test_parse_sections_accepts_bold_wrapped_heading_lines(self):
+        text = (
+            "**1. Deal Summary**\nWaiting.\n"
+            "**2. Stakeholders**\nPriya Shah.\n"
+            "**3. Objections**\nSecurity.\n"
+            "**4. Competitor**\nCargoFlow.\n"
+            "**5. Open Promises**\nSecurity brief.\n"
+            "**6. Recommended Questions**\n- Ask Anil.\n"
+        )
+        sections = parse_sections(text)
+        self.assertEqual(
+            [title for _, title, _ in sections],
+            [
+                "Deal Summary",
+                "Stakeholders",
+                "Objections",
+                "Competitor",
+                "Open Promises",
+                "Recommended Questions",
+            ],
+        )
+
+    def test_numbered_questions_stay_inside_the_questions_section(self):
+        text = (
+            "1. Deal Summary\nWaiting.\n"
+            "2. Stakeholders\nPriya.\n"
+            "3. Objections\nSecurity.\n"
+            "4. Competitor\nCargoFlow.\n"
+            "5. Open Promises\nSecurity brief.\n"
+            "6. Recommended Questions\n"
+            "1. What does Anil need before he decides?\n"
+            "2. Has Raj read the security note?\n"
+            "3. Is the case study enough for Priya?\n"
+        )
+        sections = parse_sections(text)
+        self.assertEqual(len(sections), 6)
+        self.assertEqual(sections[5][1], "Recommended Questions")
+        self.assertIn("What does Anil need", sections[5][2])
+        self.assertIn("Has Raj read", sections[5][2])
+
+    def test_strip_memory_indexes_from_recommendations(self):
+        raw = "Recommendation – avoid early discounting per playbook lesson [35], [45]."
+        cleaned = strip_memory_indexes(raw)
+        self.assertNotIn("[35]", cleaned)
+        self.assertNotIn("[45]", cleaned)
+        self.assertIn("avoid early discounting per playbook lesson.", cleaned)
 
     def test_bad_tool_arguments_are_returned_not_raised(self):
         args, error = parse_tool_arguments("{not json")
@@ -217,6 +302,8 @@ class BriefFlowTests(unittest.TestCase):
         self.assertIn("Recalling deal history…", labels)
         self.assertIn("Building your pre-call brief…", labels)
         self.assertIn("Priya Shah", brief.text)
+        self.assertNotRegex(self.groq.calls[0]["messages"][1]["content"], r"\[\d+\]")
+        self.assertIn("high-relevance memories selected from", brief.trace[-2]["detail"])
 
     def test_same_flow_twice(self):
         for _ in range(2):
@@ -290,11 +377,98 @@ class BriefFlowTests(unittest.TestCase):
             )
         self.assertIn("empty brief", caught.exception.message)
 
+    def test_brief_strips_indexes_the_model_writes(self):
+        self.groq.content = self.SAMPLE.replace(
+            "Waiting on security.",
+            "Waiting on security. Recommendation – avoid early discounting per playbook lesson [35], [45].",
+        )
+        brief = run_brief(
+            groq_client=self.groq,
+            memory=self.memory,
+            store=self.store,
+            deal=self.deal,
+            question="Prepare the call",
+            use_memory=True,
+        )
+        self.assertNotIn("[35]", brief.text)
+        self.assertNotIn("[45]", brief.text)
+        self.assertIn("avoid early discounting per playbook lesson.", brief.text)
+
     def test_friendly_errors_hide_traces(self):
         self.assertIn("key was rejected", friendly_service_error(RuntimeError("401 unauthorized"), "Hindsight"))
         message = friendly_service_error(ConnectionError("failed to establish a connection"), "Hindsight")
         self.assertIn("Hindsight is unavailable right now", message)
         self.assertNotIn("Traceback", friendly_service_error(RuntimeError('Traceback (most recent call last):\n  File "x.py"'), "Groq"))
+
+
+class SelectionTests(unittest.TestCase):
+    def test_selection_covers_later_facts_and_caps_playbook(self):
+        deal = [self._deal(index, f"Warehouse filing note {index} is stored.") for index in range(14)]
+        deal.extend(
+            [
+                self._deal(14, "Priya Shah is the champion and the VP Operations buyer."),
+                self._deal(15, "Raj raised a security objection about SOC 2 and SSO."),
+                self._deal(16, "CargoFlow is the competitor and is cheaper."),
+                self._deal(17, "The pricing discussion is a request for a discount."),
+                self._deal(18, "The security brief for Raj is an overdue promise."),
+                self._deal(19, "The latest call on 24 September covered the warehouse."),
+            ]
+        )
+        playbook = [
+            self._play(index, f"Playbook lesson {index} from Meridian Health and Kaveri Retail.")
+            for index in range(4)
+        ]
+        selected = select_memories(deal + playbook)
+        texts = " ".join(item["text"] for item in selected)
+        self.assertGreaterEqual(len(selected), 8)
+        self.assertLessEqual(len(selected), 12)
+        self.assertLessEqual(sum(1 for item in selected if "playbook" in item["tags"]), 3)
+        self.assertIn("Priya Shah", texts)
+        self.assertIn("CargoFlow", texts)
+        self.assertIn("security objection", texts)
+        self.assertIn("discount", texts)
+        self.assertIn("overdue promise", texts)
+        self.assertIn("latest call", texts)
+        self.assertIn("Meridian Health", texts)
+        self.assertNotEqual(
+            [item["text"] for item in selected],
+            [item["text"] for item in (deal + playbook)[:10]],
+        )
+
+    def test_selection_keeps_a_short_recall(self):
+        memories = [self._deal(index, f"Fact {index} about the account.") for index in range(3)]
+        self.assertEqual(len(select_memories(memories)), 3)
+
+    def test_selection_drops_duplicate_text(self):
+        memories = [
+            self._deal(0, "Priya Shah is the champion."),
+            self._deal(1, "Priya Shah is the champion."),
+            self._deal(2, "CargoFlow is the competitor."),
+        ]
+        selected = select_memories(memories)
+        self.assertEqual(sum(1 for item in selected if "Priya" in item["text"]), 1)
+
+    @staticmethod
+    def _deal(rank: int, text: str) -> dict:
+        return {
+            "text": text,
+            "type": "world",
+            "tags": ["deal:northwind-logistics"],
+            "source": "Northwind Logistics",
+            "relevance": "High",
+            "hindsight_rank": rank,
+        }
+
+    @staticmethod
+    def _play(rank: int, text: str) -> dict:
+        return {
+            "text": text,
+            "type": "experience",
+            "tags": ["playbook"],
+            "source": "Meridian Health",
+            "relevance": "High",
+            "hindsight_rank": rank,
+        }
 
 
 class ScriptedMemory:

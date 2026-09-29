@@ -124,6 +124,31 @@ def render_memories(memories: list[dict]) -> None:
         )
 
 
+def render_selection(brief) -> None:
+    detail = ""
+    for step in brief.trace or []:
+        if step.get("label") == "Relevant memories selected":
+            detail = step.get("detail") or ""
+            break
+    if not detail:
+        detail = f"{len(brief.memories)} memories selected"
+    counts: dict[str, int] = {}
+    for item in brief.memories:
+        source = item.get("source") or "Hindsight"
+        counts[source] = counts.get(source, 0) + 1
+    chips = "".join(
+        f"<span class='chip'>{esc(name)}<b>{count}</b></span>" for name, count in counts.items()
+    )
+    st.markdown(
+        "<div class='picked'>"
+        f"<strong>{esc(detail)}</strong>"
+        "<span>Groq only saw this short list. Open the list below to read each memory.</span>"
+        f"<div class='chips'>{chips}</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_trace(trace: list[dict]) -> None:
     if not trace:
         return
@@ -210,8 +235,14 @@ st.markdown(
         </div>
       </div>
       <div class="status">
+        <span class="hindsight-status {memory_state}">
+          <span class="status-dot"></span>
+          <span class="hindsight-copy">
+            <strong>{memory_label}</strong>
+            <em>{"Past deals can be recalled" if memory_state == "on" else "Memory briefs are unavailable"}</em>
+          </span>
+        </span>
         <span class="pill {groq_state}"><span class="status-dot"></span>{groq_label}</span>
-        <span class="pill {memory_state}"><span class="status-dot"></span>{memory_label}</span>
         <span class="pill neutral">{esc(groq_model())}</span>
       </div>
     </div>
@@ -328,11 +359,22 @@ if view == "Prepare":
             on_change=apply_prompt,
             label_visibility="collapsed",
         )
-        go_col, compare_col, _spacer = st.columns([1.35, 1.45, 1.6])
+        go_col, compare_col = st.columns([1.7, 1], gap="medium")
         with go_col:
-            go = st.button("Brief from Memory", type="primary", disabled=not (client and hindsight_on))
+            go = st.button(
+                "Brief from Memory",
+                type="primary",
+                key="brief_go",
+                disabled=not (client and hindsight_on),
+                use_container_width=True,
+            )
         with compare_col:
-            compare = st.button("Compare with no memory", disabled=not client)
+            compare = st.button(
+                "Compare with no memory",
+                key="brief_compare",
+                disabled=not client,
+                use_container_width=True,
+            )
         if not client:
             st.caption("Add GROQ_API_KEY to .env. AI generation is unavailable until then.")
         elif not hindsight_on:
@@ -406,23 +448,31 @@ if view == "Prepare":
         memory_brief = result["memory"]
         generic_brief = result["generic"]
         if memory_brief and generic_brief:
+            st.markdown(
+                "<div class='compare-intro'>"
+                "<div class='ready'>Memory-powered briefing ready</div>"
+                "<p>Same question, two briefs. <b>With Hindsight</b> uses recalled history from this deal and other deals. "
+                "<b>Without memory</b> only has the company, stage, and value.</p>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
             mem_col, gen_col = st.columns(2, gap="medium")
             with mem_col:
-                st.markdown(
-                    "<div class='ready'>Memory-powered briefing ready</div>",
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    "<div class='col-label'>With Hindsight Memory<span>This deal, plus tactics from deals already closed</span></div>",
-                    unsafe_allow_html=True,
-                )
-                render_brief(memory_brief.text, "mem")
+                with st.container(key="cmp_with"):
+                    st.markdown(
+                        "<div class='col-label with'>With Hindsight"
+                        "<span>People, objections, open promises, and lessons from other deals</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    render_brief(memory_brief.text, "mem")
             with gen_col:
-                st.markdown(
-                    "<div class='col-label'>Without Memory<span>Same question. No Hindsight recall.</span></div>",
-                    unsafe_allow_html=True,
-                )
-                render_brief(generic_brief.text, "gen")
+                with st.container(key="cmp_without"):
+                    st.markdown(
+                        "<div class='col-label without'>Without memory"
+                        "<span>No past calls and no other deals</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    render_brief(generic_brief.text, "gen")
         elif memory_brief:
             st.markdown(
                 "<div class='ready'>Memory-powered briefing ready</div>",
@@ -435,8 +485,9 @@ if view == "Prepare":
             render_brief(generic_brief.text, "gen")
 
         if memory_brief:
+            render_selection(memory_brief)
             render_trace(memory_brief.trace)
-            with st.expander(f"Memories used ({len(memory_brief.memories)})"):
+            with st.expander(f"Read the {len(memory_brief.memories)} selected memories"):
                 render_memories(memory_brief.memories)
             if hindsight_on and st.button("Ask Hindsight to reflect"):
                 with st.spinner("Hindsight is reasoning over the bank…"):
@@ -592,21 +643,18 @@ elif view == "Timeline":
             result_label, result_class = result_badge.get(item["result"], ("", ""))
             result_html = f"<span class='badge {result_class}'>{result_label}</span>" if result_label else ""
             items.append(
-                f"""
-                <div class="tl-item">
-                  <div class="tl-head">
-                    <span class="badge {badge_class(item['type'])}">{esc(item['type'])}</span>
-                    {result_html}
-                    <span class="tl-date">{esc(pretty_date(item['happened_on']))}</span>
-                    <span class="tl-contact">{esc(item['contact'])}</span>
-                  </div>
-                  <p><b>Notes</b><br>{esc(item['notes'])}</p>
-                  {outcome}
-                  {tactic}
-                </div>
-                """
+                "<div class='tl-item'>"
+                "<div class='tl-head'>"
+                f"<span class='badge {badge_class(item['type'])}'>{esc(item['type'])}</span>"
+                f"{result_html}"
+                f"<span class='tl-date'>{esc(pretty_date(item['happened_on']))}</span>"
+                f"<span class='tl-contact'>{esc(item['contact'])}</span>"
+                "</div>"
+                f"<p><b>Notes</b><br>{esc(item['notes'])}</p>"
+                f"{outcome}{tactic}"
+                "</div>"
             )
-        st.markdown(f"<div class='tl'>{''.join(items)}</div>", unsafe_allow_html=True)
+        st.html("<div class='tl'>" + "".join(items) + "</div>")
 
 elif view == "Memory":
     st.markdown("<div class='section-label'>What Hindsight holds</div>", unsafe_allow_html=True)
