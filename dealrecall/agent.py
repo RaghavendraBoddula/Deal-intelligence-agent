@@ -87,7 +87,7 @@ class Brief:
 
 
 def groq_model() -> str:
-    return os.getenv("GROQ_MODEL", "qwen/qwen3-32b").strip() or "qwen/qwen3-32b"
+    return os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip() or "openai/gpt-oss-120b"
 
 
 def parse_tool_arguments(raw: str | None) -> tuple[dict | None, str | None]:
@@ -365,10 +365,14 @@ def _complete(groq_client, messages: list[dict]) -> str:
     except Exception as exc:
         message = friendly_service_error(exc, "Groq")
         low = str(exc).lower()
-        if "model" in low and any(token in low for token in ("not found", "does not exist", "invalid", "decommissioned")):
+        if "model" in low and any(
+            token in low
+            for token in ("not found", "does not exist", "invalid", "decommissioned")
+        ):
             message = (
                 f"Groq rejected the model {groq_model()}. "
-                "Set GROQ_MODEL in .env to qwen/qwen3-32b or openai/gpt-oss-120b."
+                "Set GROQ_MODEL in .env to a supported Groq model such as "
+                "openai/gpt-oss-120b."
             )
         raise BriefError(message) from None
     choice = (getattr(response, "choices", None) or [None])[0]
