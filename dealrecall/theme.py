@@ -267,7 +267,7 @@ div[data-testid="stVerticalBlock"] {
   gap: 0.4rem;
 }
 
-.context h2 {
+.context h2, .context h2 * {
   color: #FFFFFF !important;
   font-family: 'Plus Jakarta Sans', sans-serif !important;
   font-size: 1.75rem !important;
@@ -277,7 +277,7 @@ div[data-testid="stVerticalBlock"] {
   line-height: 1.2 !important;
 }
 
-.context p {
+.context p, .context p * {
   color: #CBD5E1 !important;
   font-size: 0.95rem !important;
   line-height: 1.55 !important;

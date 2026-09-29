@@ -350,8 +350,13 @@ def apply_prompt() -> None:
 if view == "Prepare":
     with st.container(key="panel_prepare"):
         if "user_query" not in st.session_state:
-            st.session_state["user_query"] = QUICK_PROMPTS["Prep the call"]
-        st.text_input("What do you need before the call?", key="user_query")
+            st.session_state["user_query"] = ""
+        st.text_area(
+            "Ask a custom question",
+            placeholder="Ask anything about this deal...",
+            key="user_query",
+            label_visibility="collapsed"
+        )
         st.pills(
             "Quick prompts",
             list(QUICK_PROMPTS.keys()),
