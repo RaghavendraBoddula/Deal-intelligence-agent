@@ -152,6 +152,51 @@ class Memory:
                 retain_async=False,
             )
 
+def _safe_run_coroutine(coro):
+    import asyncio
+    import concurrent.futures
+    try:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result()
+        else:
+            return asyncio.run(coro)
+    except Exception:
+        return None
+
+
+    def delete_interaction_memory(self, document_id: str) -> bool:
+        """Safely delete interaction document and its lesson from Hindsight bank if supported."""
+        deleted = False
+        try:
+            if hasattr(self.client, "documents") and hasattr(self.client.documents, "delete_document"):
+                res = self.client.documents.delete_document(bank_id=self.bank_id, document_id=document_id)
+                if inspect.iscoroutine(res):
+                    _safe_run_coroutine(res)
+                deleted = True
+                try:
+                    res_l = self.client.documents.delete_document(bank_id=self.bank_id, document_id=f"lesson-{document_id}")
+                    if inspect.iscoroutine(res_l):
+                        _safe_run_coroutine(res_l)
+                except Exception:
+                    pass
+        except Exception:
+            deleted = False
+        return deleted
+
+    def update_interaction_memory(self, deal: dict, row: dict) -> bool:
+        """Safely update interaction in Hindsight by re-retaining with updated content."""
+        try:
+            self.delete_interaction_memory(row["document_id"])
+            self.retain_interaction(deal, row)
+            return True
+        except Exception:
+            return False
+
     def sync_pending(self, store: Store) -> int:
         pending = store.pending_retention()
         kept: list[str] = []

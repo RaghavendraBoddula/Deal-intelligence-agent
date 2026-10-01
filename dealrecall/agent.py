@@ -462,6 +462,7 @@ def _memory_user(question: str, memories: list[dict]) -> str:
     )
 
 
+
 def _complete(groq_client, messages: list[dict]) -> str:
     try:
         response = groq_client.chat.completions.create(
